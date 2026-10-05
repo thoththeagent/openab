@@ -333,12 +333,15 @@ This is by design — scheduled jobs may target channels outside the human-facin
 
 The practical consequence: **whoever can write the cron configuration can run unattended prompts as the agent.** For baseline `[[cron.jobs]]`, that is whoever controls `config.toml`. For usercron, it is whoever can write `cronjob.toml` — which, with [Agent-Managed Schedules](#agent-managed-schedules), includes the agent itself.
 
-If your agent reads untrusted content (web pages, RSS feeds, transcripts, messages from other users), a prompt injection that persuades the agent to append a `[[jobs]]` entry turns a one-off injection into a recurring one that looks like a legitimate schedule.
+For usercron, write access also means **command execution**: `disable_on_success` is run by OpenAB itself via `sh -c` (see [Goal-Driven Auto-Disable](#goal-driven-auto-disable)) on every schedule match, before the prompt is sent. It runs outside the agent's tool-permission model, so running the agent without `--trust-all-tools` does not limit it. An agent that can write files but not run shell commands can still get recurring shell execution by writing a `[[jobs]]` entry.
+
+If your agent reads untrusted content (web pages, RSS feeds, transcripts, messages from other users), a prompt injection that persuades the agent to append a `[[jobs]]` entry turns a one-off injection into a recurring one that looks like a legitimate schedule — either as a prompt or as a `disable_on_success` shell command.
 
 Mitigations:
 
 - Leave `usercron_enabled = false` unless you need agent-managed schedules.
-- Review changes to `cronjob.toml` — for example, track it in git and diff it periodically, or watch it with a file monitor such as `inotifywait`.
+- Restrict the agent's own write access to `$HOME/.openab/` (where relative `usercron_path` resolves), or require approval for writes there, if your agent backend supports path-scoped tool permissions. Avoid `--trust-all-tools` for agents that ingest untrusted content. This is the preventive control.
+- Review changes to `cronjob.toml` — for example, track it in git and diff it periodically, or watch it with a file monitor such as `inotifywait`. This only detects after the fact: the file is hot-reloaded on the next scheduler tick, so a new job can fire within a minute of being written.
 - Put long-lived schedules in baseline `[[cron.jobs]]`, stored where the agent cannot write (e.g. a read-only mount or a Kubernetes ConfigMap).
 
 ## Behaviors
