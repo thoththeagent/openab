@@ -328,22 +328,25 @@ pub fn load_usercron_file(path: &Path, configured_platforms: &[&str]) -> Vec<Cro
         }
     };
     // Validate each entry individually — keep valid ones, skip bad ones.
-    // Writeback matches on the trimmed `id` (see `update_usercron_job`), so two
-    // entries whose ids differ only by surrounding whitespace would collide:
-    // the second job's `thread_id`/`enabled` writeback would land on the first
-    // entry. Skip later duplicates (after trimming) so each live id maps to one
-    // writeback target.
+    // Writeback (`update_usercron_job`) targets the first raw TOML entry whose
+    // trimmed `id` matches, so the invariant the loader must enforce is: the
+    // first entry in file order with a given trimmed id owns that id, even if it
+    // is invalid or disabled. Reserve the id BEFORE any other validation so a
+    // cron-invalid/bad-timezone/disabled first entry still claims it; otherwise
+    // a later same-id entry would load, run, and write back onto the first raw
+    // entry — the cross-job write this guard exists to prevent. Do not move this
+    // check below the validations.
     let mut seen_ids: HashSet<String> = HashSet::new();
     parsed.jobs.into_iter().enumerate().filter(move |(i, job)| {
+        if let Some(id) = non_empty_opt(job.id.as_deref()) {
+            if !seen_ids.insert(id.to_owned()) {
+                warn!(index = i, id, "usercron: duplicate id (compared after trimming), skipping");
+                return false;
+            }
+        }
         if let Err(e) = parse_cron_expr(&job.schedule) {
             warn!(index = i, schedule = %job.schedule, error = %e, "usercron: invalid cron expression, skipping");
             return false;
-        }
-        if let Some(id) = non_empty_opt(job.id.as_deref()) {
-            if !seen_ids.insert(id.to_owned()) {
-                warn!(index = i, id, "usercron: duplicate id after trimming, skipping");
-                return false;
-            }
         }
         if job.timezone.parse::<Tz>().is_err() {
             warn!(index = i, timezone = %job.timezone, "usercron: invalid timezone, skipping");
@@ -1646,6 +1649,114 @@ message = "second"
         let jobs = load_usercron_file(&path, &["discord"]);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].message, "first");
+    }
+
+    #[test]
+    fn load_usercron_file_skips_exact_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cronjob.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[jobs]]
+id = "x"
+schedule = "* * * * *"
+channel = "123"
+message = "first"
+
+[[jobs]]
+id = "x"
+schedule = "* * * * *"
+channel = "123"
+message = "second"
+"#,
+        )
+        .unwrap();
+        // Exact duplicates also share one writeback target (behavior change from
+        // main, where both used to load and run): only the first survives.
+        let jobs = load_usercron_file(&path, &["discord"]);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message, "first");
+    }
+
+    #[test]
+    fn load_usercron_file_first_entry_owns_id_even_when_invalid() {
+        // The first file-order entry with a given trimmed id owns that id, even
+        // if it is itself skipped. A later valid same-id entry must not load,
+        // because its writeback would land on the first raw entry.
+        let dir = tempfile::tempdir().unwrap();
+        let configured = &["discord"];
+
+        // (a) first entry has an invalid cron expression
+        let path = dir.path().join("invalid_cron.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[jobs]]
+id = "x"
+schedule = "not a cron"
+channel = "123"
+message = "first"
+
+[[jobs]]
+id = " x "
+schedule = "* * * * *"
+channel = "123"
+message = "second"
+"#,
+        )
+        .unwrap();
+        assert!(load_usercron_file(&path, configured).is_empty());
+
+        // (b) first entry has an invalid timezone
+        let path = dir.path().join("invalid_tz.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[jobs]]
+id = "x"
+schedule = "* * * * *"
+timezone = "Not/AZone"
+channel = "123"
+message = "first"
+
+[[jobs]]
+id = " x "
+schedule = "* * * * *"
+channel = "123"
+message = "second"
+"#,
+        )
+        .unwrap();
+        assert!(load_usercron_file(&path, configured).is_empty());
+
+        // (c) first entry is disabled
+        let path = dir.path().join("disabled.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[jobs]]
+id = "x"
+schedule = "* * * * *"
+enabled = false
+channel = "123"
+message = "first"
+
+[[jobs]]
+id = " x "
+schedule = "* * * * *"
+channel = "123"
+message = "second"
+"#,
+        )
+        .unwrap();
+        // `enabled = false` entries are kept by the loader (parse_job_list drops
+        // them later), but they still claim the id, so the later entry is
+        // skipped and only the disabled first entry remains.
+        let jobs = load_usercron_file(&path, configured);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].message, "first");
+        assert_eq!(jobs[0].enabled, false);
     }
 
     #[tokio::test]
