@@ -68,7 +68,7 @@ A blank value (`""` or whitespace) is treated the same as omitting the field, fo
 
 Writeback edge cases for the `id` row:
 
-- A blank `id` counts as unset. Ids are compared after trimming, so entries whose ids differ only by surrounding whitespace collide; the scheduler keeps the first and skips the rest at load (`usercron: duplicate id after trimming, skipping`).
+- A blank `id` counts as unset. Ids are compared after trimming, so any duplicates — including identical values and ids that differ only by surrounding whitespace — share one writeback target. The scheduler keeps the first entry in file order and skips the rest at load (`usercron: duplicate id (compared after trimming), skipping`). The first entry owns the id even when it is itself invalid or disabled, so a later entry with the same id still does not run.
 - The pinned thread takes effect once the scheduler reloads the file (next tick, normally within 60s).
 - If OpenAB cannot write `cronjob.toml` (see [Choosing the right scope](#choosing-the-right-scope)), nothing is pinned and every run creates a new thread. The logs show `failed to persist usercron thread_id`. This also means `disable_on_success` cannot write `enabled = false` back, so the goal command keeps running on every match — avoid both patterns when the file is unwritable.
 - On gateway platforms (Telegram), if topic creation fails or times out (5s), the job posts to the chat itself and the **chat ID** is written back as `thread_id`. Later runs then target that ID as a topic. Remove the written-back `thread_id` line to retry topic creation.
